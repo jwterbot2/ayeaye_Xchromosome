@@ -1,0 +1,293 @@
+//REQUIRES -d EXONFILE= commandline
+//			Path to bed file containing exonic regions (uses a background selected DFE)
+//REQUIRES -d SILFILE= commandline
+//			Path to bed file containing regions to be silenced or excluded
+//			(e.g., repeat regions) when overlapping with neutral regions (i.e., non-exonic).
+//EXPECTS  -d CONT= 0 or 1 or 2 commandline
+//			0=Run with burn-in checkpointed; 1=Run from checkpointed burn-in; 2=Run with no checkpointing
+//EXPECTS  -d NREP= # commandline
+//			Replicate number to use in output files
+//EXPECTS  -d SEXRATIO= # commandline
+//			Sex ratio of population to simulate
+
+//modified Recipe from 157 in the SLiM Manual
+//slim chapter 25.11 shows how to make custom DFEs
+//p1 is North and ancestral population, p2 is non-North
+
+initialize() 
+{
+
+	if(!exists("EXONFILE") | !exists("SILFILE"))
+	{
+		stop("No EXONFILE defined.");
+	}
+	if(!exists("CONT"))
+	{
+		defineConstant("CONT", 0);
+	}
+	if(!exists("NREP"))
+	{
+		defineConstant("NREP", 0);
+	}
+	if(!exists("SEXRATIO"))
+	{
+		defineConstant("SEXRATIO", 0.5);
+	}
+
+	defineGlobal("start", clock());
+	
+	//ModelConstants
+	defineConstant("AP",11695);
+	defineConstant("T_BOTTLESPLIT", 10*AP);
+	defineConstant("T_DECL", T_BOTTLESPLIT + 1126);
+	defineConstant("T_SAMPLE", T_DECL + 7);
+
+	defineConstant("BOTTLE_RATE", 0.396597);
+	defineConstant("SPLIT_RATE", 0.290103);
+	defineConstant("EXP_RATE", -0.13443432643);
+	
+	defineConstant("MU_RATE_FEMALE", 0.82e-8);
+	defineConstant("MU_RATE_MALE", 2.22e-8);
+	defineConstant("RECOMB_RATE", 1e-8);
+
+	defineConstant("CHRLEN", 132115000);
+	
+	defineConstant("OUTSTEM", "ayeaye.scaffold_9.nonPAR");
+	
+	ls();
+	
+	//Neutral
+	initializeMutationType("m1",0.5,"f",0.0);
+	//Effectively Neutral
+	initializeMutationType("m2",0.5,"s","return runif(1,-(1/(2*AP)),0);");
+	//Mildly Deleterious
+	initializeMutationType("m3",0.5,"s","return runif(1,-(10/(2*AP)),-(1/(2*AP)));");
+	//Moderately Deleterious
+	initializeMutationType("m4",0.5,"s","return runif(1,-(100/(2*AP)),-(10/(2*AP)));");
+	//Very Deleterious(Not found in Johri et al. 2023)
+	//initializeMutationType("m5",0.5,"s","return runif(1,-INF,-(100/(2*AP)));");
+
+
+	//initialize the region types
+	initializeGenomicElementType("g1",m1,1.0);
+	initializeGenomicElementType("g2",c(m2,m3,m4),c(0.5,0.2,0.3));
+	
+	print("Debug Output ");
+	print("Mem Usage: " + usage("rss"));
+	print("Runtime: " + (clock()-start));
+	print(EXONFILE);
+	
+	//read in exonic regions
+	exon_file = readFile(EXONFILE);
+	sil_file = readFile(SILFILE);
+	silpnt=0;
+	curPos = 0;
+	for(exon in exon_file)
+	{
+		fields = strsplit(exon,sep="\t");
+		curExon = c(asInteger(fields[1]), asInteger(fields[2]));
+		
+		//progress through unlinked region, not adding sites in silenced regions until exon start is reached.
+		while(curPos < curExon[0] & silpnt < length(sil_file))
+		{
+			fields = strsplit(sil_file[silpnt],sep="\t");
+			curSil = c(asInteger(fields[1]), asInteger(fields[2]));		
+			//if next exon starts before next silence AND current position is before exon starts, add neutral region
+			if(curExon[0] <= curSil[0])
+			{
+				initializeGenomicElement(g1, curPos, curExon[0]-1);
+			}
+			//if current position is before silence starts, add neutral region up to silence
+			else if(curPos < curSil[0])
+			{
+				initializeGenomicElement(g1, curPos, curSil[0]-1);
+			}
+
+			//if exon starts before silence ends (always will if starts before silence starts), go to exon
+			if(curExon[0] < curSil[1])
+			{
+				curPos = curExon[1];
+			}
+			//otherwise increment silence
+			else
+			{
+				curPos = curSil[1];
+				silpnt = silpnt + 1;
+				if(curPos >= curExon[0])
+				{
+					curPos = curExon[1];
+				}
+			}
+		}
+		if(curPos < curExon[0])
+		{
+			initializeGenomicElement(g1, curPos, curExon[0]-1);
+			curPos = curExon[1];
+		}
+		
+		//print(curPos);
+		initializeGenomicElement(g2, curExon[0], curExon[1]-1);
+		
+		//increment silences until they end before current position
+		while(curPos > curSil[1] & silpnt < length(sil_file))
+		{
+			silpnt = silpnt + 1;
+			if(silpnt < length(sil_file))
+			{
+				fields = strsplit(sil_file[silpnt],sep="\t");
+				curSil = c(asInteger(fields[1]), asInteger(fields[2]));
+			}
+		}
+	}
+	
+	while(curPos < CHRLEN)
+	{
+		if(silpnt >= length(sil_file))
+		{
+			initializeGenomicElement(g1, curPos, CHRLEN - 1);
+			curPos = CHRLEN;
+		}
+		else
+		{
+			fields = strsplit(sil_file[silpnt],sep="\t");
+			curSil = c(asInteger(fields[1]), asInteger(fields[2]));
+			if(curPos >= curSil[0])
+			{
+				curPos = curSil[1];
+				silpnt = silpnt + 1;
+			}
+			else
+			{
+				initializeGenomicElement(g1, curPos, curSil[0]-1);
+				curPos = curSil[1];
+				silpnt = silpnt + 1;
+			}
+			
+		}
+	}
+	
+
+	initializeRecombinationRate(RECOMB_RATE);
+	initializeSex("X");
+	initializeMutationRate(MU_RATE_FEMALE, sex="F");
+	initializeMutationRate(MU_RATE_MALE, sex="M");
+	
+	print("Debug Output ");
+	print("Mem Usage: " + usage("rss"));
+	print("Runtime: " + (clock()-start));
+
+}
+
+
+1 first()
+{
+
+	//set all mutation types to same stack group with last-in policy
+	for(mutType in community.allMutationTypes)
+	{
+		mutType.convertToSubstitution = T;
+		mutType.mutationStackGroup = 1;
+		mutType.mutationStackPolicy = "l";
+	}
+	//register events
+	if(CONT==1)
+	{
+		community.registerEarlyEvent(NULL, s101.source, 1,1);
+	}
+	else
+	{
+		community.registerEarlyEvent(NULL, s100.source, 1,1);
+	}
+	community.registerEarlyEvent(NULL, s102.source, T_BOTTLESPLIT, T_BOTTLESPLIT);
+	community.registerEarlyEvent(NULL, s103.source, T_DECL, T_SAMPLE - 1);
+	community.registerEarlyEvent(NULL, s301.source, T_SAMPLE, T_SAMPLE);
+	
+	community.deregisterScriptBlock(s100);
+	community.deregisterScriptBlock(s101);
+	community.deregisterScriptBlock(s102);
+	community.deregisterScriptBlock(s103);
+	community.deregisterScriptBlock(s301);
+}
+
+
+
+
+//check progress in log files
+1: late() {
+	if (community.tick % 1000 == 0) 
+	{
+		print("Debug Output " + community.tick);
+		print("Mem Usage: " + usage("rss"));
+		print("Runtime: " + (clock()-start));
+		if(community.tick < T_BOTTLESPLIT)
+		{
+			print("POP SIZES: P1-" + p1.individualCount);
+		}
+		else
+		{
+			print("POP SIZES: P1-" + p1.individualCount + " P2-" + p2.individualCount);
+		}
+		
+		if(community.tick % 5000 == 0 & CONT != 2)
+		{
+			sim.outputFull(getwd() + "/" + OUTSTEM + ".SR" + SEXRATIO + ".burnin." + NREP + ".slout");
+			writeFile(getwd() + "/" + OUTSTEM + ".SR" + SEXRATIO + ".cont." + NREP + ".txt", "1");
+		}
+	}
+}
+
+
+//INITIALIZE ANCESTRAL POPULATION
+s100 early() 
+{
+	sim.addSubpop("p1", AP, sexRatio=SEXRATIO);
+}
+
+//RESUME BURNIN
+s101 early()
+{
+	sim.readFromPopulationFile(getwd() + "/" + OUTSTEM + ".burnin." + NREP + ".slout");
+	sim.recalculateFitness();
+	community.tick = community.tick + 1;
+	
+	print("Debug Output " + community.tick);
+	print("Generation set to burn-in duration plus one:" + community.tick);
+	print("Mem Usage: " + usage("rss"));
+	print("Runtime: " + (clock()-start));
+	print("POP SIZES: P1-" + p1.individualCount);
+}
+
+//BOTTLESPLIT
+s102 early()
+{
+	p1Size = asInteger(round(AP * BOTTLE_RATE * SPLIT_RATE));
+	p2Size = asInteger(round(AP * BOTTLE_RATE * (1 - SPLIT_RATE)));
+	print(p1Size);
+	print(p2Size);
+	sim.addSubpopSplit("p2", p2Size, p1, sexRatio=SEXRATIO);
+	p1.setSubpopulationSize(p1Size);
+}
+
+//EXP_RATE
+s103 early() 
+{
+	p1.setSubpopulationSize(asInteger(round(p1.individualCount * E^(EXP_RATE)))); 
+	p2.setSubpopulationSize(asInteger(round(p2.individualCount * E^(EXP_RATE))));
+	
+	print("Debug Output " + community.tick);
+	print("Mem Usage: " + usage("rss"));
+	print("Runtime: " + (clock()-start));
+	print("POP SIZES: P1-" + p1.individualCount + " P2-" + p2.individualCount);
+}
+
+
+//OUTPUT
+s301 early() 
+{
+	print("Debug Output " + community.tick);
+	print("Mem Usage: " + usage("rss"));
+	print("Runtime: " + (clock()-start));
+	print("POP SIZES: P1-" + p1.individualCount + " P2-" + p2.individualCount);
+	outputSample = c(p2.sampleIndividuals(3, replace = F, sex = "F"), p2.sampleIndividuals(2, replace = F, sex = "M"));
+	outputSample.genomes.outputVCF(filePath=getwd() + "/" + OUTSTEM + ".SR" + SEXRATIO + ".sample." + NREP + ".vcf");
+}
